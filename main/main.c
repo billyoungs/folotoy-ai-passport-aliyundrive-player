@@ -1,4 +1,4 @@
-// main/main.c —— 百度网盘随身听入口:初始化、按键分发、页面状态机、空闲熄屏、心跳。
+// main/main.c —— 阿里云盘随身听入口:初始化、按键分发、页面状态机、空闲熄屏、心跳。
 //
 // 按键(三键:上 / OK / 下)。开机进入播放界面,没有首页:
 //   播放页    OK=播放/暂停(还没有曲目时打开“全部音频”)  长按OK=进入设置
@@ -125,11 +125,11 @@ static void on_wifi_event(int evt, const char *data) {
     if (evt == 2) {
         ESP_LOGI(TAG, "Wi-Fi connected: %s", data);
         g_bp.wifi_up = true;
-        bp_baidu_on_wifi(true);
+        bp_aliyun_on_wifi(true);
         post_event(EVT_WIFI_UP);
     } else if (evt == 3) {
         g_bp.wifi_up = false;
-        bp_baidu_on_wifi(false);
+        bp_aliyun_on_wifi(false);
     }
 }
 
@@ -155,27 +155,35 @@ static void start_web_config(void) {
 }
 
 static bool require_auth(void) {
-    if (bp_baidu_state() == BP_BD_READY) return true;
+    if (bp_aliyun_state() == BP_BD_READY) return true;
     if (!g_bp.wifi_up) {
         bp_ui_toast("请先连接 Wi-Fi");
         go(BP_PAGE_WIFI);
         return false;
     }
-    bp_baidu_auth_start();
+    bp_aliyun_auth_start();
     go(BP_PAGE_AUTH);
     return false;
 }
 
-// 每页在网盘接口里的起始偏移(过滤后页码不能直接换算),用于“上一页”。
-static uint32_t s_page_start[BP_PAGE_HISTORY];
+// 每页在网盘接口里的分页游标(过滤后页码不能直接换算),用于“上一页”。
+static char s_page_marker[BP_PAGE_HISTORY][BP_MARKER_MAX];
 
-static void open_list_at(bp_source_t source, const char *dir, int page, uint32_t start) {
+// 目录层级栈:浏览网盘时记录每层目录的 file_id,供“返回上级”使用。0 为根目录。
+static char s_dir_ids[BP_FOLDER_MAX][BP_FILE_ID_MAX];
+static int s_dir_depth;
+
+static void open_list_at(bp_source_t source, const char *dir, const char *dir_file_id,
+                         int page, const char *marker) {
     // 浏览网盘时先自动暂停播放(挂起并释放播放占用的内存),在播放页按 OK 继续。
     if (bp_player_suspend()) bp_ui_toast("已暂停播放");
-    bp_list_req_t req = {.source = source, .page = page, .start = start};
+    bp_list_req_t req = {.source = source, .page = page};
+    strlcpy(req.marker, marker ? marker : "", sizeof(req.marker));
     strlcpy(req.dir, dir ? dir : "/", sizeof(req.dir));
-    if (page >= 0 && page < BP_PAGE_HISTORY) s_page_start[page] = start;
-    int rc = bp_baidu_list_request(&req);
+    strlcpy(req.parent_file_id, dir_file_id ? dir_file_id : "root", sizeof(req.parent_file_id));
+    if (page >= 0 && page < BP_PAGE_HISTORY)
+        strlcpy(s_page_marker[page], req.marker, BP_MARKER_MAX);
+    int rc = bp_aliyun_list_request(&req);
     if (rc == -3) {
         bp_ui_toast("请稍候");
         return;
@@ -189,13 +197,18 @@ static void open_list_at(bp_source_t source, const char *dir, int page, uint32_t
 }
 
 static void open_list(bp_source_t source, const char *dir) {
-    open_list_at(source, dir, 0, 0);
+    if (source == BP_SRC_DIR) {
+        // 从根开始浏览网盘:重置目录层级栈。
+        s_dir_depth = 0;
+        strlcpy(s_dir_ids[0], "root", sizeof(s_dir_ids[0]));
+    }
+    open_list_at(source, dir, "root", 0, "");
 }
 
 static void list_activate(void) {
     bp_list_t *list = malloc(sizeof(bp_list_t));
     if (!list) return;
-    bp_baidu_list_snapshot(list);
+    bp_aliyun_list_snapshot(list);
     int fi = -1;
     bp_row_kind_t kind = BP_ROW_NONE;
     if (bsp_lvgl_lock(500)) {
@@ -204,26 +217,37 @@ static void list_activate(void) {
     }
     switch (kind) {
         case BP_ROW_RETRY:
-            open_list_at(list->req.source, list->req.dir, list->req.page, list->req.start);
+            open_list_at(list->req.source, list->req.dir, list->req.parent_file_id,
+                         list->req.page, list->req.marker);
             break;
         case BP_ROW_NEXT:
-            open_list_at(list->req.source, list->req.dir, list->req.page + 1, list->next_start);
+            open_list_at(list->req.source, list->req.dir, list->req.parent_file_id,
+                         list->req.page + 1, list->next_marker);
             break;
         case BP_ROW_PREV: {
             int prev = list->req.page - 1;
             // 超出历史记录(极深的翻页)时回到第一页。
-            if (prev >= BP_PAGE_HISTORY) open_list(list->req.source, list->req.dir);
-            else open_list_at(list->req.source, list->req.dir, prev, s_page_start[prev]);
+            if (prev >= BP_PAGE_HISTORY)
+                open_list_at(list->req.source, list->req.dir, list->req.parent_file_id, 0, "");
+            else
+                open_list_at(list->req.source, list->req.dir, list->req.parent_file_id,
+                             prev, s_page_marker[prev]);
             break;
         }
         case BP_ROW_FILE: {
             const bp_file_t *f = &list->files[fi];
             if (f->is_dir) {
                 char child[BP_PATH_MAX];
-                if (bp_path_child(list->req.dir, f->name, child, sizeof(child)))
-                    open_list(BP_SRC_DIR, child);
-                else
+                if (bp_path_child(list->req.dir, f->name, child, sizeof(child))) {
+                    // 压入目录栈:下一层的目录 file_id 即本目录。
+                    if (s_dir_depth + 1 < BP_FOLDER_MAX) {
+                        s_dir_depth++;
+                        strlcpy(s_dir_ids[s_dir_depth], f->file_id, sizeof(s_dir_ids[s_dir_depth]));
+                    }
+                    open_list_at(BP_SRC_DIR, child, f->file_id, 0, "");
+                } else {
                     bp_ui_toast("路径太长");
+                }
             } else if (f->format == BP_FMT_UNKNOWN) {
                 bp_ui_toast("暂不支持此格式");
             } else if (bp_player_play_list(list, fi) == 0) {
@@ -240,12 +264,16 @@ static void list_activate(void) {
 static void list_back(void) {
     bp_list_t *list = malloc(sizeof(bp_list_t));
     if (!list) return;
-    bp_baidu_list_snapshot(list);
+    bp_aliyun_list_snapshot(list);
     char parent[BP_PATH_MAX];
-    if (list->req.source == BP_SRC_DIR && bp_path_parent(list->req.dir, parent, sizeof(parent)))
-        open_list(BP_SRC_DIR, parent);
-    else
+    if (list->req.source == BP_SRC_DIR && bp_path_parent(list->req.dir, parent, sizeof(parent))) {
+        // 返回上级:目录栈回退一层,用父目录的 file_id 重新列出。
+        if (s_dir_depth > 0) s_dir_depth--;
+        const char *pid = s_dir_ids[s_dir_depth];
+        open_list_at(BP_SRC_DIR, parent, pid, 0, "");
+    } else {
         go(BP_PAGE_SETTINGS);
+    }
     free(list);
 }
 
@@ -281,12 +309,12 @@ static void autoplay_last(void) {
     }
 }
 
-// 联网:未绑定网盘就进入第 2 步扫码绑定;已绑定则从配网相关页面回到播放界面,并续播上次的目录。
+// 联网:未绑定网盘就进入第 2 步绑定;已绑定则从配网相关页面回到播放界面,并续播上次的目录。
 static void on_wifi_up(void) {
     bp_page_t page = bp_ui_page();
     bool setup_page = page == BP_PAGE_PLAYER || page == BP_PAGE_WIFI ||
                       page == BP_PAGE_WIFI_AP || page == BP_PAGE_AUTH;
-    if (bp_baidu_state() == BP_BD_READY) {
+    if (bp_aliyun_state() == BP_BD_READY) {
         if (page == BP_PAGE_WIFI || page == BP_PAGE_WIFI_AP) {
             set_onboarding(false);
             bp_ui_toast("网络已连接");
@@ -299,10 +327,10 @@ static void on_wifi_up(void) {
     if (!setup_page || s_auth_declined) return;
     screen_off(false);
     s_last_activity_ms = now_ms();
-    bp_baidu_auth_start();
+    bp_aliyun_auth_start();
     set_onboarding(true);
     go(BP_PAGE_AUTH);
-    bp_ui_toast("请用百度网盘 App 扫码");
+    bp_ui_toast("请用 USB 串口绑定阿里云盘");
 }
 
 // 绑定成功:在绑定页时直接打开“全部音频”,马上可以选歌。
@@ -385,7 +413,7 @@ static void handle_input(const input_event_t *in) {
 
         case BP_PAGE_AUTH:
             if (ok && lng) {
-                bp_baidu_auth_cancel();
+                bp_aliyun_auth_cancel();
                 s_auth_declined = true;
                 set_onboarding(false);
                 go(BP_PAGE_PLAYER);
@@ -433,7 +461,7 @@ static void handle_input(const input_event_t *in) {
         case BP_PAGE_ACCOUNT:
             if (ok && lng) go(BP_PAGE_SETTINGS);
             else if (ok && click) {
-                if (bp_baidu_state() != BP_BD_READY) {
+                if (bp_aliyun_state() != BP_BD_READY) {
                     require_auth();
                 } else if (!s_logout_armed) {
                     s_logout_armed = true;
@@ -441,7 +469,7 @@ static void handle_input(const input_event_t *in) {
                 } else {
                     s_logout_armed = false;
                     bp_player_stop();
-                    bp_ui_toast(bp_baidu_logout() == 0 ? "已退出网盘账号" : "退出失败");
+                    bp_ui_toast(bp_aliyun_logout() == 0 ? "已退出网盘账号" : "退出失败");
                     if (bsp_lvgl_lock(500)) { bp_ui_account_arm(false); bsp_lvgl_unlock(); }
                 }
             } else if ((up || down) && click && s_logout_armed) {
@@ -507,12 +535,8 @@ int bp_test_page(void) { return bp_ui_page(); }
 // ---- 定时器 -----------------------------------------------------------------------
 static void idle_timer_cb(void *arg) {
     (void)arg;
-    // 播放中也熄屏省电,音乐继续;授权页与配网页需要扫码,保持常亮。
-    bp_page_t page = bp_ui_page();
-    if (!g_bp.screen_off && page != BP_PAGE_AUTH && page != BP_PAGE_WIFI_AP &&
-        now_ms() - s_last_activity_ms > IDLE_TIMEOUT_MS) {
-        screen_off(true);
-    }
+    // 自动熄屏已按用户要求取消:屏幕保持常亮,不随空闲超时关闭。
+    // 如需恢复,重新启用 IDLE_TIMEOUT_MS 判断并调用 screen_off(true) 即可。
 }
 
 static void heartbeat_cb(void *arg) {
@@ -522,11 +546,28 @@ static void heartbeat_cb(void *arg) {
     ESP_LOGI(TAG, "[HB] free=%u min=%u largest=%u wifi=%d bd=%d play=%d pos=%lu buf=%u%%",
              (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size(),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), g_bp.wifi_up,
-             bp_baidu_state(), pi.state, (unsigned long)pi.pos_ms, pi.buffer_pct);
+             bp_aliyun_state(), pi.state, (unsigned long)pi.pos_ms, pi.buffer_pct);
+}
+
+// UI 看门狗:taskLVGL 若因堆耗尽等原因陷入 while(1)(实测 LVGL 字形缓冲分配失败
+// 会触发 LV_ASSERT_HANDLER=while(1)),200ms 的 UI 刷新打点就会停止。连续约 12s
+// 无刷新即重启,避免屏幕永久停在"正在读取"只能拔电。
+static void ui_wdt_cb(void *arg) {
+    (void)arg;
+    static int dead_ticks = 0;
+    int64_t age = bp_ui_ms_since_refresh();
+    if (age > 12000) {
+        if (++dead_ticks >= 6) {
+            ESP_LOGE(TAG, "UI unresponsive for %lld ms; restarting", (long long)age);
+            esp_restart();
+        }
+    } else {
+        dead_ticks = 0;
+    }
 }
 
 void app_main(void) {
-    ESP_LOGI(TAG, "Baidupan Pocket Player v" BP_APP_VERSION);
+    ESP_LOGI(TAG, "Aliyunpan Pocket Player v" BP_APP_VERSION);
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -541,7 +582,7 @@ void app_main(void) {
         return;
     }
     bsp_battery_init();
-    bp_baidu_init();
+    bp_aliyun_init();
     bp_player_init();
     load_ui_prefs();   // 皮肤与亮度要在界面创建前确定
 
@@ -568,6 +609,10 @@ void app_main(void) {
     esp_timer_handle_t hb_timer;
     if (esp_timer_create(&hb_args, &hb_timer) == ESP_OK)
         esp_timer_start_periodic(hb_timer, 30 * 1000 * 1000);
+    const esp_timer_create_args_t uiwdt_args = {.callback = ui_wdt_cb, .name = "bp_uiwdt"};
+    esp_timer_handle_t uiwdt_timer;
+    if (esp_timer_create(&uiwdt_args, &uiwdt_timer) == ESP_OK)
+        esp_timer_start_periodic(uiwdt_timer, 2 * 1000 * 1000);
 
     bp_wifi_init(on_wifi_event);
     if (bp_wifi_saved_count() == 0) {
@@ -578,7 +623,7 @@ void app_main(void) {
         go(BP_PAGE_WIFI_AP);
     } else {
         // 已绑定网盘且有上次播放记录:联网前先在播放页提示即将续播,免得以为没反应。
-        if (bp_baidu_state() == BP_BD_READY) resume_hint("正在连接网络…");
+        if (bp_aliyun_state() == BP_BD_READY) resume_hint("正在连接网络…");
         bp_wifi_start_station();
     }
     bp_console_start();

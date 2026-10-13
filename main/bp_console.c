@@ -74,27 +74,81 @@ static void cmd_wifi(const char *arg) {
     }
 }
 
-static void cmd_baidu(const char *arg) {
-    if (!strncasecmp(arg, "AUTH", 4)) {
-        int rc = bp_baidu_auth_start();
-        printf("BAIDU: auth rc=%d\r\n", rc);
-        if (rc == 0 && bsp_lvgl_lock(500)) {
-            bp_ui_goto(BP_PAGE_AUTH);
-            bsp_lvgl_unlock();
+static void cmd_aliyun(const char *arg) {
+    if (!strncasecmp(arg, "TOKEN ", 6)) {
+        // 写入 refresh_token 并触发授权。令牌是敏感数据,只回显首尾各 2 位。
+        const char *rt = arg + 6;
+        while (*rt == ' ' || *rt == '\t') rt++;
+        size_t len = strlen(rt);
+        // 去掉尾部空白(复制时可能带上空格/换行)。
+        while (len && (rt[len - 1] == '\r' || rt[len - 1] == '\n' ||
+                       rt[len - 1] == ' ' || rt[len - 1] == '\t'))
+            len--;
+        // 浏览器控制台输出字符串时带引号(如 'xxxx'),去掉首尾包裹的引号。
+        if (len >= 2 && ((rt[0] == '"' && rt[len - 1] == '"') ||
+                         (rt[0] == '\'' && rt[len - 1] == '\''))) {
+            rt++;
+            len -= 2;
         }
-        for (int i = 0; rc == 0 && i < 30; i++) {
-            char url[96], code[16];
-            bp_baidu_get_auth(url, sizeof(url), code, sizeof(code));
-            if (code[0]) {
-                printf("BAIDU: open %s  (code %s)\r\n", url, code);
-                break;
+        if (len < 8 || len >= 160) {
+            printf("ALI: usage ALI TOKEN <refresh_token>\r\n");
+            return;
+        }
+        char tmp[160];
+        memcpy(tmp, rt, len);
+        tmp[len] = 0;
+        // —— 诊断:逐字符校验并打印长度/首尾各 8 位,用于和浏览器里的原始 token 对比,
+        // 一次性判定是"令牌已失效"还是"串口粘贴丢字符/混入非法字符"。——
+        int bad = 0;
+        for (size_t i = 0; i < len; i++)
+            if (!((tmp[i] >= '0' && tmp[i] <= '9') ||
+                  (tmp[i] >= 'a' && tmp[i] <= 'f') ||
+                  (tmp[i] >= 'A' && tmp[i] <= 'F'))) bad++;
+        size_t show = len < 16 ? len : 8;
+        printf("ALI: diag len=%u badchar=%d head=%.*s tail=%.*s\r\n",
+               (unsigned)len, bad, (int)show, tmp,
+               (int)(len >= 16 ? 8 : 0), len >= 16 ? tmp + len - 8 : "");
+        int rc = bp_aliyun_set_refresh_token(tmp);
+        char mask[32];
+        snprintf(mask, sizeof(mask), "%.2s…%.2s", tmp, tmp + len - 2);
+        printf("ALI: token %s rc=%d\r\n", mask, rc);
+        if (rc == 0 || rc == 1) {
+            if (bsp_lvgl_lock(500)) {
+                bp_ui_goto(BP_PAGE_AUTH);
+                bsp_lvgl_unlock();
             }
-            vTaskDelay(pdMS_TO_TICKS(500));
         }
     } else if (!strncasecmp(arg, "LOGOUT", 6)) {
-        printf("BAIDU: logout rc=%d\r\n", bp_baidu_logout());
+        printf("ALI: logout rc=%d\r\n", bp_aliyun_logout());
+    } else if (!strncasecmp(arg, "DRIVE ", 6)) {
+        // 诊断:手动指定活动盘并触发一次"全部音频"列表,验证指定盘的响应内容。
+        int rc = bp_aliyun_set_drive(arg + 6);
+        char d[80], r[80];
+        bp_aliyun_drive_info(d, sizeof(d), r, sizeof(r));
+        printf("ALI: drive rc=%d drive=%s resource=%s\r\n", rc, d, r);
+        if (rc == 0) {
+            bp_list_req_t req;
+            memset(&req, 0, sizeof(req));
+            req.source = BP_SRC_ALL_AUDIO;
+            strlcpy(req.dir, "/", sizeof(req.dir));
+            printf("ALI: scan rc=%d (用 LIST 查看结果)\r\n", bp_aliyun_list_request(&req));
+        }
+    } else if (!strncasecmp(arg, "QR", 2)) {
+        // 诊断:直接触发设备屏幕扫码登录(手机阿里云盘 App)。
+        printf("ALI: qr start rc=%d (屏幕将显示二维码)\r\n", bp_aliyun_qr_start());
+    } else if (!strncasecmp(arg, "SHOW", 4)) {
+        char d[80], r[80];
+        bp_aliyun_drive_info(d, sizeof(d), r, sizeof(r));
+        printf("ALI: drive=%s resource=%s state=%d\r\n", d, r, bp_aliyun_state());
+    } else if (!strncasecmp(arg, "SCAN", 4)) {
+        // 诊断:直接按当前盘触发一次"全部音频"列表,免按键导航。
+        bp_list_req_t req;
+        memset(&req, 0, sizeof(req));
+        req.source = BP_SRC_ALL_AUDIO;
+        strlcpy(req.dir, "/", sizeof(req.dir));
+        printf("ALI: scan rc=%d (用 LIST 查看结果)\r\n", bp_aliyun_list_request(&req));
     } else {
-        printf("BAIDU: state=%d (0 none, 1 waiting, 2 ready)\r\n", bp_baidu_state());
+        printf("ALI: state=%d (0 none, 1 waiting, 2 ready)\r\n", bp_aliyun_state());
     }
 }
 
@@ -103,7 +157,7 @@ static void cmd_state(void) {
     bp_player_get_info(&pi);
     printf("STATE: page=%d wifi=%d bd=%d off=%d vol=%u bri=%u skin=%u play=%d pos=%lu/%lu idx=%d/%d "
            "rate=%lu ch=%u kbps=%lu buf=%u%% err=%s name=%s\r\n",
-           bp_test_page(), g_bp.wifi_up, bp_baidu_state(), g_bp.screen_off, g_bp.volume, g_bp.brightness,
+           bp_test_page(), g_bp.wifi_up, bp_aliyun_state(), g_bp.screen_off, g_bp.volume, g_bp.brightness,
            g_bp.skin, pi.state, (unsigned long)pi.pos_ms, (unsigned long)pi.total_ms, pi.index + 1,
            pi.count, (unsigned long)pi.rate, pi.channels, (unsigned long)pi.kbps,
            pi.buffer_pct, pi.error ? pi.error : "-", pi.name);
@@ -111,10 +165,10 @@ static void cmd_state(void) {
 
 static void cmd_list(void) {
     static bp_list_t list;   // 约 1.7 KiB,不放在任务栈上
-    bp_baidu_list_snapshot(&list);
-    printf("LIST: src=%d dir=%s page=%d start=%lu next=%lu more=%d status=%d count=%d\r\n",
-           list.req.source, list.req.dir, list.req.page, (unsigned long)list.req.start,
-           (unsigned long)list.next_start, list.has_more, list.status, list.count);
+    bp_aliyun_list_snapshot(&list);
+    printf("LIST: src=%d dir=%s page=%d marker=%s next=%s more=%d status=%d count=%d\r\n",
+           list.req.source, list.req.dir, list.req.page, list.req.marker,
+           list.next_marker, list.has_more, list.status, list.count);
     for (int i = 0; i < list.count; i++)
         printf("  [%d] %s %s\r\n", i, list.files[i].is_dir ? "DIR " : "FILE", list.files[i].name);
 }
@@ -122,56 +176,72 @@ static void cmd_list(void) {
 static void console_task(void *arg) {
     (void)arg;
     char line[160], up[160];
-    printf("bp-console: ready (WIFI SET s|p / WIFI LIST / BAIDU AUTH / STATE / KEY / UI)\r\n");
+    size_t n = 0;
+    printf("bp-console: ready (WIFI SET s|p / WIFI LIST / ALI TOKEN <rt> / STATE / KEY / UI)\r\n");
     for (;;) {
-        if (!fgets(line, sizeof(line), stdin)) {
-            vTaskDelay(pdMS_TO_TICKS(100));
+        // ESP-IDF 的 UART VFS 是非规范模式:每次 read 只返回当前已到达的字节,
+        // 无数据时返回 0(EOF)。因此不能用 fgets 等整行,必须逐字符累积到换行再解析。
+        int c = getchar();
+        if (c == EOF) {
+            vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
-        line[strcspn(line, "\r\n")] = 0;
-        strlcpy(up, line, sizeof(up));
-        for (char *p = up; *p; p++) *p = (char)toupper((unsigned char)*p);
-        if (!strncmp(up, "WIFI", 4)) {
-            const char *a = line + 4;
-            while (*a == ' ') a++;
-            cmd_wifi(a);
-        } else if (!strncmp(up, "BAIDU", 5)) {
-            const char *a = up + 5;
-            while (*a == ' ') a++;
-            cmd_baidu(a);
-        } else if (!strcmp(up, "STATE")) {
-            cmd_state();
-        } else if (!strcmp(up, "LIST")) {
-            cmd_list();
-        } else if (!strcmp(up, "HEAP")) {
-            printf("HEAP: free=%u largest=%u min=%u\r\n", (unsigned)esp_get_free_heap_size(),
-                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-                   (unsigned)esp_get_minimum_free_heap_size());
-        } else if (!strcmp(up, "STOP")) {
-            bp_player_stop();
-            printf("STOP: ok\r\n");
-        } else if (!strncmp(up, "KEY ", 4)) {
-            char button[12] = "", event[12] = "CLICK";
-            int n = sscanf(up + 4, "%11s %11s", button, event);
-            int b = n > 0 && !strcmp(button, "UP") ? 0 : n > 0 && !strcmp(button, "OK") ? 1 :
-                    n > 0 && !strcmp(button, "DOWN") ? 2 : -1;
-            int kind = !strcmp(event, "CLICK") ? 0 : !strcmp(event, "LONG") ? 1 :
-                       !strcmp(event, "DOUBLE") ? 2 : -1;
-            if (b < 0 || kind < 0)
-                printf("KEY: usage KEY UP|OK|DOWN [CLICK|LONG|DOUBLE]\r\n");
-            else
-                printf("KEY: rc=%d\r\n", bp_test_key(b, kind));
-        } else if (!strncmp(up, "UI", 2)) {
-            int pg = atoi(up + 2);
-            if (pg < 0 || pg >= BP_PAGE_COUNT) {
-                printf("UI: 0..%d\r\n", BP_PAGE_COUNT - 1);
-            } else if (bsp_lvgl_lock(500)) {
-                bp_ui_goto((bp_page_t)pg);
-                bsp_lvgl_unlock();
-                printf("UI: page %d\r\n", pg);
+        if (c == '\n' || c == '\r') {
+            if (n == 0) continue;   // 空行直接丢弃
+            line[n] = 0;
+            n = 0;
+            strlcpy(up, line, sizeof(up));
+            for (char *p = up; *p; p++) *p = (char)toupper((unsigned char)*p);
+            if (!strncmp(up, "WIFI", 4)) {
+                const char *a = line + 4;
+                while (*a == ' ') a++;
+                cmd_wifi(a);
+            } else if (!strncmp(up, "ALI", 3)) {
+                // 关键:参数必须取原始大小写的 line,不能取 up!
+                // up 已被整行 toupper,refresh_token 中的小写字母 a-f 若被转成 A-F,
+                // 阿里云盘服务器按大小写敏感校验,必然返回 InvalidParameter.RefreshToken。
+                const char *a = line + 3;
+                while (*a == ' ') a++;
+                cmd_aliyun(a);
+            } else if (!strcmp(up, "STATE")) {
+                cmd_state();
+            } else if (!strcmp(up, "LIST")) {
+                cmd_list();
+            } else if (!strcmp(up, "HEAP")) {
+                printf("HEAP: free=%u largest=%u min=%u\r\n", (unsigned)esp_get_free_heap_size(),
+                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                       (unsigned)esp_get_minimum_free_heap_size());
+            } else if (!strcmp(up, "STOP")) {
+                bp_player_stop();
+                printf("STOP: ok\r\n");
+            } else if (!strncmp(up, "KEY ", 4)) {
+                char button[12] = "", event[12] = "CLICK";
+                int n = sscanf(up + 4, "%11s %11s", button, event);
+                int b = n > 0 && !strcmp(button, "UP") ? 0 : n > 0 && !strcmp(button, "OK") ? 1 :
+                        n > 0 && !strcmp(button, "DOWN") ? 2 : -1;
+                int kind = !strcmp(event, "CLICK") ? 0 : !strcmp(event, "LONG") ? 1 :
+                           !strcmp(event, "DOUBLE") ? 2 : -1;
+                if (b < 0 || kind < 0)
+                    printf("KEY: usage KEY UP|OK|DOWN [CLICK|LONG|DOUBLE]\r\n");
+                else
+                    printf("KEY: rc=%d\r\n", bp_test_key(b, kind));
+            } else if (!strncmp(up, "UI", 2)) {
+                int pg = atoi(up + 2);
+                if (pg < 0 || pg >= BP_PAGE_COUNT) {
+                    printf("UI: 0..%d\r\n", BP_PAGE_COUNT - 1);
+                } else if (bsp_lvgl_lock(500)) {
+                    bp_ui_goto((bp_page_t)pg);
+                    bsp_lvgl_unlock();
+                    printf("UI: page %d\r\n", pg);
+                }
+            } else if (line[0]) {
+                printf("bp-console: unknown '%s'\r\n", line);
             }
-        } else if (line[0]) {
-            printf("bp-console: unknown '%s'\r\n", line);
+        } else if (c == 0x08 || c == 0x7f) {
+            // 退格:删除已累积的最后一个字符
+            if (n > 0) n--;
+        } else if (n < sizeof(line) - 1) {
+            line[n++] = (char)c;
         }
     }
 }

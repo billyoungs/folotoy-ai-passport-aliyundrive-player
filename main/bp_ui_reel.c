@@ -30,8 +30,8 @@ extern const lv_image_dsc_t bp_disc_bluey[36], bp_disc_bingo[36], bp_disc_peppa[
 #define FISH_FRAMES 9
 extern const lv_image_dsc_t bp_fish_head[FISH_FRAMES], bp_fish_tail[FISH_FRAMES];
 
-#define COL_INK    0x092113   // --passport-on-green
-#define COL_TAPE_R 0x0A8F4D
+#define COL_INK    0x2A0A33   // 紫色主题下的墨色(原绿 0x092113)
+#define COL_TAPE_R 0x7B1FA2
 #define COL_WHITE  0xFFFFFF
 #define COL_ALERT  0x8C1D18
 
@@ -65,8 +65,8 @@ typedef struct {
 } reel_variant_t;
 
 static const reel_variant_t VARIANTS[] = {
-    // 盘面三重对称:0..120° 共 24 帧。底色为 ai-passport.folotoy.cn --passport-green。
-    {{bp_reel_disc, bp_reel_disc}, 24, 120.0f, 0x20E47C, true},
+    // 盘面三重对称:0..120° 共 24 帧。底色为主题紫色(原绿色 0x20E47C)。
+    {{bp_reel_disc, bp_reel_disc}, 24, 120.0f, 0x9C27B0, true},
     // 人物盘面没有对称性:整圈 36 帧;脸在中心,不画中心轴。
     {{bp_disc_bluey, bp_disc_bingo}, 36, 360.0f, 0x5CB8EC, false},
     {{bp_disc_peppa, bp_disc_peppa}, 36, 360.0f, 0xF58FB3, false},
@@ -363,7 +363,7 @@ void bp_reel_refresh(const bp_player_info_t *pi) {
     set_text_if(s_time, buf);
 
     set_text_if(s_title, pi->name[0] ? pi->name : "未在播放");
-    set_text_if(s_folder, pi->folder[0] ? pi->folder : idle ? "百度网盘随身听" : "");
+    set_text_if(s_folder, pi->folder[0] ? pi->folder : idle ? "阿里云盘随身听" : "");
 
     // 信息行:格式码率 · 第几首 · 文件夹 · 时长;出错或空闲时换成提示。
     const char *lines[4];
@@ -382,7 +382,7 @@ void bp_reel_refresh(const bp_player_info_t *pi) {
         if (pi->count) { snprintf(l1, sizeof(l1), "第 %d / %d 首", pi->index + 1, pi->count); lines[n++] = l1; }
         if (pi->folder[0]) { snprintf(l2, sizeof(l2), "文件夹 · %s", pi->folder); lines[n++] = l2; }
         if (pi->total_ms) { fmt_time(pi->total_ms, b, sizeof(b)); snprintf(l3, sizeof(l3), "时长 · %s", b); lines[n++] = l3; }
-        if (!n) lines[n++] = "百度网盘随身听";
+        if (!n) lines[n++] = "阿里云盘随身听";
     }
     for (int i = 0; i < 4; i++) set_text_if(s_ticker[i], i < n ? lines[i] : "");
     int idx = n > 1 ? (int)((now / 3000) % n) : 0;

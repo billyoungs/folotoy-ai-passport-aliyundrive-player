@@ -9,7 +9,12 @@
 
 static const char *TAG = "bsp_lvgl";
 
-#define BSP_LVGL_DRAW_BUFFER_LINES 40
+// 行数从 40 降到 20(19.2KB→9.6KB)再降到 16(9.6KB→7.5KB):LVGL 显示缓冲是
+// 堆里最大的常驻连续块,行数越多空闲堆的最大连续块越小,浏览网盘的列表请求 TLS
+// 握手(证书验签需要 >20KB 临时分配)就可能失败。16 行后释放的 ~2KB 堆让给
+// 播放环形缓冲(STREAM_SIZE 8→12KB 的 .bss 增长);UI 仅 SPI 刷新次数增加,
+// 对 240x320 小屏无明显影响。
+#define BSP_LVGL_DRAW_BUFFER_LINES 16
 
 static lv_display_t *s_disp;
 static bool s_port_initialized;

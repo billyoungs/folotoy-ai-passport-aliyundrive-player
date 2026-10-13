@@ -1,8 +1,8 @@
 **English** · [简体中文](/docs/README.zh_CN.md)
 
-> **Baidupan Pocket Player** — this repository is an AI Passport application that streams MP3/WAV
-> audio from Baidu Netdisk, with web-based Wi-Fi setup and QR-code authorization. See
-> [baidupan-pocket-player.md](baidupan-pocket-player.md) for setup, buttons and limits. The template
+> **AliyunDrive Pocket Player** — this repository is an AI Passport application that streams MP3/WAV
+> audio from Aliyun Drive, with web-based Wi-Fi setup and QR-code authorization. See
+> [aliyundrive-pocket-player.md](aliyundrive-pocket-player.md) for setup, buttons and limits. The template
 > documentation below is kept from the upstream [FoloToy AI Passport](https://github.com/FoloToy/ai-passport).
 
 <h1 align="center">FoloToy AI PASSPORT</h1>

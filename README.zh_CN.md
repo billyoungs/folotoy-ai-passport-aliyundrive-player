@@ -2,10 +2,10 @@
   <a href="README.md">English</a> · <strong>简体中文</strong>
 </p>
 
-<h1 align="center">百度网盘随身听</h1>
+<h1 align="center">阿里云盘随身听</h1>
 
 <p align="center">
-  <strong>把百度网盘里的音乐，装进一枚随身工牌。</strong><br>
+  <strong>把阿里云盘里的音乐，装进一枚随身工牌。</strong><br>
   运行在 FoloToy AI Passport(ESP32-C3,无 PSRAM)上的 MP3/M4A/AAC/WAV 流式播放固件。
 </p>
 
@@ -14,18 +14,15 @@
 ## 功能
 
 - **直接播放网盘音频**:不占本地存储,不需要手机 App。可按文件夹浏览,也可按名称顺序列出网盘内全部 MP3、M4A、AAC 和 WAV。
-- **扫码登录**:屏幕显示二维码,用百度网盘 App 扫码确认即可;授权保存在设备上并自动续期。
-- **网页配网**:首次开机自动开启热点 `BaiduPlayer-XXXX`,扫屏幕二维码连上后在弹出的网页里选网络、填密码。
+- **扫码登录**:屏幕显示二维码,用手机阿里云盘 App 扫码确认即可;授权保存在设备上并自动续期。
+- **网页配网**:首次开机自动开启热点 `AliyunPlayer-XXXX`,扫屏幕二维码连上后在弹出的网页里选网络、填密码。
 - **连续播放**:自动播放下一首并加载下一页;下载中断后按 HTTP Range 断点续传;音量重启后保留。
 - **中文文件名**:内置字库覆盖 GB2312 全部 7445 个字符。
 - **三键操作**:专为 240×320 圆角屏设计;30 秒无操作自动熄屏,音乐继续播放。
 
 ## 快速开始
 
-1. **准备百度凭据**:在[百度网盘开放平台](https://pan.baidu.com/union/console)创建应用,把
-   `main/bp_baidu_keys.example.h` 复制为 `main/bp_baidu_keys.h`,填入 AppKey 与 SecretKey。
-   该文件已被 Git 忽略,切勿提交。
-2. **编译烧录**(ESP-IDF 5.5.3):
+1. **编译烧录**(ESP-IDF 5.5.3):
 
    ```bash
    idf.py set-target esp32c3
@@ -35,12 +32,12 @@
    ```
 
    完整门禁 `./tools/validate.sh` 会运行仓库检查、主机测试并生成校验过的合并镜像。
-3. **连接 Wi-Fi**:手机扫屏幕二维码加入热点 `BaiduPlayer-XXXX`,配网网页会自动弹出(或访问
+2. **连接 Wi-Fi**:手机扫屏幕二维码加入热点 `AliyunPlayer-XXXX`,配网网页会自动弹出(或访问
    `http://192.168.4.1`)。仅支持 2.4 GHz。
-4. **绑定网盘并播放**:联网后自动进入绑定页,用**百度网盘 App** 扫屏幕二维码并确认授权;
+3. **绑定网盘并播放**:联网后自动进入绑定页,用**阿里云盘 App** 扫屏幕二维码并确认授权;
    完成后自动打开“全部音频”,选中歌曲按 OK 即可播放。
 
-> 用你自己的凭据编译出的固件内含 SecretKey,不要公开 `build/` 目录下的产物。
+> 无需任何应用凭据:阿里云盘登录使用设备屏幕上的官方 OAuth 扫码流程,固件中不内嵌任何密钥。
 
 ## 按键
 
@@ -76,16 +73,16 @@
 ## 工作原理
 
 ```text
-百度 OAuth(设备码) ─► xpan list / categorylist ─► filemetas 下载直链
-                                                       │
-控制任务 ─► 下载任务(HTTPS、302 跳转、Range 续传) ─► 20 KB 环形缓冲
-                                                       │
+阿里云盘扫码登录 ─► /v2/account/token(refresh_token 轮换) ─► /adrive/v3/file/list ─► 下载直链
+                                                                                          │
+控制任务 ─► 下载任务(HTTPS、302 跳转、Range 续传) ─► 14 KB 环形缓冲
+                                                                                          │
                         解码任务(Helix MP3 / AAC / WAV) ─► 单声道 PCM ─► ES8311 / I2S
 ```
 
 | 模块 | 职责 |
 | --- | --- |
-| [`main/bp_baidu.c`](main/bp_baidu.c) | 设备码授权、加锁的单次刷新令牌、目录与音频列表、下载直链 |
+| [`main/bp_aliyun.c`](main/bp_aliyun.c) | 扫码授权、refresh_token 轮换、目录与音频列表、下载直链 |
 | [`main/bp_player.c`](main/bp_player.c) | 流式播放流水线、播放列表、自动续播、分阶段内存日志 |
 | [`main/bp_ui.c`](main/bp_ui.c) | LVGL 页面:播放、列表、设置常驻;不常用的页面进入时创建、离开时释放 |
 | [`main/bp_ui_reel.c`](main/bp_ui_reel.c) | 磁带界面:转轮与鱼的动画帧预渲染在 Flash,声波幅度跟随实时音量 |
@@ -95,13 +92,15 @@
 
 ESP32-C3 全部可用堆约 180 KB。实测播放时:每首开始前空闲约 106 KB,CDN 的 TLS 连接建立后约
 52 KB,解码中最低约 20 KB,每首结束后完全回收。详细说明、串口命令与限制见
-[docs/baidupan-pocket-player.zh_CN.md](docs/baidupan-pocket-player.zh_CN.md)。
+[docs/aliyundrive-pocket-player.zh_CN.md](docs/aliyundrive-pocket-player.zh_CN.md)。
 
 ## 致谢
 
-- 基于 [FoloToy AI Passport](https://github.com/FoloToy/ai-passport)(板级支持、构建与校验工具),
+- 本仓库是 [lewangdev/baidupan-pocket-player](https://github.com/lewangdev/baidupan-pocket-player)(百度网盘随身听)的
+  fork,后者基于 [FoloToy AI Passport](https://github.com/FoloToy/ai-passport)(板级支持、构建与校验工具),
   其模板文档保留在 [docs/README.zh_CN.md](docs/README.zh_CN.md)。
-- 百度网盘接入参考 [netdisk-recording-badge](https://github.com/openbrt/netdisk-recording-badge)。
+- 阿里云盘接入(设备扫码登录、refresh_token 轮换、盘/文件接口)为本 fork 的原创工作,
+  参考社区公开的阿里云盘 OAuth 流程实现。
 - Wi-Fi 与配网门户来自 [esp-wifi-connect](https://github.com/78/esp-wifi-connect),AAC 解码为 Helix AAC(取自 [ESP8266Audio](https://github.com/earlephilhower/ESP8266Audio),RPSL),MP3 解码来自
   [libhelix-mp3](https://components.espressif.com/components/chmorgan/esp-libhelix-mp3),中文字体为思源黑体(SIL OFL)。
 

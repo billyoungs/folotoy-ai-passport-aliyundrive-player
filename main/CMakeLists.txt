@@ -2,7 +2,7 @@ idf_component_register(
     SRCS "main.c"
          "bp_ui.c"
          "bp_ui_reel.c"
-         "bp_baidu.c"
+         "bp_aliyun.c"
          "bp_keys.c"
          "bp_player.c"
          "bp_media.c"
@@ -21,7 +21,7 @@ target_sources(${COMPONENT_LIB} PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/../assets/images/bp_char_discs.c"
 )
 
-# 百度应用凭据:构建时从被 Git 忽略的 bp_baidu_keys.h 生成编码后的 bp_keys_obf.h,
+# 应用凭据:构建时从被 Git 忽略的 bp_baidu_keys.h 生成编码后的 bp_keys_obf.h,
 # C 代码只包含生成的头文件,固件中不出现明文凭据。缺失时用占位符模板。
 set(BP_KEYS_SRC "${CMAKE_CURRENT_LIST_DIR}/bp_baidu_keys.h")
 if(NOT EXISTS "${BP_KEYS_SRC}")

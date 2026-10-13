@@ -27,7 +27,7 @@ static int evt_code(WifiEvent e) {
 void bp_wifi_init(bp_wifi_evt_cb_t cb) {
     s_cb = cb;
     WifiManagerConfig cfg;
-    cfg.station_hostname = "baidupan-pocket-player";
+    cfg.station_hostname = "aliyunpan-pocket-player";
     cfg.station_scan_min_interval_seconds = 5;
     cfg.station_scan_max_interval_seconds = 30;
     if (!WifiManager::GetInstance().Initialize(cfg)) {
@@ -60,6 +60,18 @@ int bp_wifi_add(const char *ssid, const char *pass) {
     s.AddSsid(ssid, pass);
     m.StartStation();
     ESP_LOGI("bp_wifi", "saved network and restarted STA: %s", ssid);
+    return 0;
+}
+
+// 测试专用:只写 NVS,不启停 STA。开机初始化阶段调用,随后走正常 StartStation 流程。
+int bp_wifi_force_ssid(const char *ssid, const char *pass) {
+    if (!ssid || !ssid[0] || !pass) return -1;
+    SsidManager &s = SsidManager::GetInstance();
+    const auto &list = s.GetSsidList();
+    for (int i = (int)list.size() - 1; i >= 0; i--)
+        if (list[i].ssid == ssid) s.RemoveSsid(i);
+    s.AddSsid(ssid, pass);
+    ESP_LOGI("bp_wifi", "hardcoded test SSID saved: %s", ssid);
     return 0;
 }
 
@@ -108,7 +120,7 @@ int bp_wifi_config_start(void) {
     // StopStation 会销毁 STA 接口;网页提交后的试连需要它拿 IP 才算成功。
     s_cfg_sta_netif = esp_netif_create_default_wifi_sta();
     s_cfg_ap = new WifiConfigurationAp();
-    s_cfg_ap->SetSsidPrefix("BaiduPlayer");
+    s_cfg_ap->SetSsidPrefix("AliyunPlayer");
     s_cfg_ap->SetLanguage("zh-CN");
     // 完成页的 /exit 在组件自建的任务里回调,这里只做关闭与回连。
     s_cfg_ap->OnExitRequested([]() { bp_wifi_config_stop(); });

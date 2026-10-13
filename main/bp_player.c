@@ -34,13 +34,22 @@
 #define CTRL_STACK 7168
 #define FETCH_STACK 7168
 #define DECODE_STACK 6144
-#define FETCH_CHUNK 2048
+// 下载每次读取 4KB:TLS 记录(16KB)分 4 次读完,比 2KB 时系统调用/调度次数减半,
+// 让 320kbps(40KB/s)下环形缓冲回填更及时。
+#define FETCH_CHUNK 4096
 #define FETCH_MAX_FAILURES 6
-#define IN_BUF_SIZE 4096
+// 输入缓冲 2048:恰好容纳最大 MP3 帧(320kbps@44.1kHz 单帧 1447B + 帧头)与
+// MAINBUF_SIZE(1940) 窗口,也满足 AAC 解码的最小缓冲(AAC_MIN_AVAIL)。再小会
+// 影响 MP3 帧装配,再大则白占 .bss(.bss 直接挤占堆池,见 STREAM_SIZE 注释)。
+#define IN_BUF_SIZE 2048
 #define PCM_MAX_SAMPLES (1152 * 2)
 // 环形缓冲与解码缓冲静态分配:若从堆里取,会切走唯一一块能容纳 TLS 16.7 KB
-// 记录缓冲的连续内存(实测 CDN 读数据时 alloc 失败)。20 KB ≈ 128 kbps 下 1.25 秒。
-#define STREAM_SIZE (20 * 1024)
+// 记录缓冲的连续内存(实测 CDN 读数据时 alloc 失败;v0.10.20 曾尝试播放时从堆
+// 分配 24KB 大缓冲,结果 TLS 握手 alloc(4781) 失败、最低堆 412B,必须回退静态)。
+// 流缓冲放 .bss(静态 RAM):.bss 每多 1KB,DRAM 堆池就少 1KB,而 CDN TLS 握手
+// 峰值要吃 ~67KB 堆,堆池过小握手必败。14KB ≈ 0.35s@320kbps,与列表请求内存
+// (响应缓冲 8→7KB)做了折中:v0.10.21 起保持 14KB,不再增大以免列表 TLS 失败。
+#define STREAM_SIZE (14 * 1024)
 #define MAX_DECODE_ERRORS 300
 
 typedef enum {
@@ -90,12 +99,12 @@ static int s_pl_count;
 static int s_pl_index;
 static bp_list_req_t s_pl_req;
 static bool s_pl_has_more;
-static uint32_t s_pl_next_start;
+static char s_pl_next_marker[BP_MARKER_MAX];
 static bp_file_t s_pending_list[BP_PLAYLIST_MAX];   // CMD_PLAY 携带的数据
 static int s_pending_count, s_pending_index;
 static bp_list_req_t s_pending_req;
 static bool s_pending_has_more;
-static uint32_t s_pending_next_start;
+static char s_pending_next_marker[BP_MARKER_MAX];
 
 static bp_player_info_t s_info;
 static volatile bool s_paused;
@@ -124,6 +133,62 @@ static void log_heap(const char *stage) {
              (unsigned)esp_get_free_heap_size(),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
              (unsigned)esp_get_minimum_free_heap_size());
+}
+
+// ---- 堆竞技场 ------------------------------------------------------------------
+// CDN 下载读 16KB TLS 记录需要 ~16.7KB 连续内存(动态缓冲按记录大小现场分配),
+// 播放期的堆碎片化会让等大空闲块不复存在(实测 free 6 万而最大块仅 16KB,分配失败,
+// 每首曲目都报网络错误)。预留 18KB"竞技场",播放全程(含获取下载直链)释放给
+// TLS 使用,暂停/曲目结束/停止时归还。MP3 解码器已静态化(见 libhelix-mp3 的
+// buffers.c 本地补丁),不再与 TLS 争连续内存。
+#define HEAP_ARENA_SIZE (18 * 1024)
+// probe 只要求"够放一条最大 TLS 记录"(16KB 内容 + ~0.4KB 记录开销 ≈ 16.7KB):
+// 坚持要求整个 18KB 竞技场时,碎片化峰值期会等满 16 秒仍放弃(实测 largest 卡在
+// 15.3KB),而其实 17KB 已够握手+读记录使用。
+#define HEAP_ARENA_PROBE (17 * 1024)
+static uint8_t *s_heap_arena;
+
+static void heap_arena_release(const char *why) {
+    if (s_heap_arena) {
+        free(s_heap_arena);
+        s_heap_arena = NULL;
+    } else {
+        // 开机后首播还没有预留块:开机阶段的多路 TLS 握手会暂时把堆搅碎,但这些
+        // 临时分配在数秒内就归还合并(实测曲目失败后 ~15s,largest 恢复到 18K)。
+        // 等待-重试直到拿到连续块,给开机自动续播留出堆自愈的时间。
+        for (int i = 0; i < 8 && !s_abort; i++) {
+            void *probe = malloc(HEAP_ARENA_PROBE);
+            if (probe) {
+                free(probe);   // 立即归还:把它放回堆顶供随后的 TLS 大记录分配
+                break;
+            }
+            if (i == 0)
+                ESP_LOGW(TAG, "waiting for a %uKB contiguous block (%s)...",
+                         (unsigned)(HEAP_ARENA_PROBE / 1024), why);
+            vTaskDelay(pdMS_TO_TICKS(2000));
+        }
+    }
+    ESP_LOGI(TAG, "arena released (%s) free=%u largest=%u", why,
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+}
+
+static void heap_arena_restore(const char *why) {
+    if (s_heap_arena) return;
+    s_heap_arena = malloc(HEAP_ARENA_SIZE);
+    ESP_LOGI(TAG, "arena %s (%s)", s_heap_arena ? "restored" : "restore failed", why);
+}
+
+// MP3 解码器跨曲目持久化:helix 初始化要分 8 次共 ~16KB 的堆分配,若在下载
+// 连接存活时初始化必然失败(实测最大块只剩 5-7KB)。改为播放开始、竞技场已
+// 释放、下载连接尚未建立的窗口内一次性初始化,之后所有曲目共用(helix 的帧间
+// 状态只有 bit reservoir,换曲最多前几帧报 MAIN_DATA_UNDERFLOW,解码循环已处理)。
+static HMP3Decoder s_mp3_dec;
+
+static void mp3_ensure(void) {
+    if (s_mp3_dec) return;
+    s_mp3_dec = MP3InitDecoder();
+    ESP_LOGI(TAG, "mp3 decoder %s", s_mp3_dec ? "ready (persistent)" : "init failed");
 }
 
 static void set_state(bp_play_state_t st, const char *error) {
@@ -166,9 +231,24 @@ static size_t stream_send(const uint8_t *data, size_t len) {
     return off;
 }
 
+// CDN 明文 HTTP 探测:TLS 下载的内存代价(握手峰值 ~64K + 16.7K 记录缓冲)几乎
+// 耗尽全部堆池,解码器与之无法共存(三代方案均失败,见 git 历史)。阿里 CDN 的
+// 直链通常同时支持 80 端口,改走明文后内存矛盾整体消失。首轮下载先试 http,
+// 一旦失败(4xx/网络错)本轮起永久回退 https,不再反复试探。
+static bool s_prefer_http = true;
+
+static void url_downgrade_http(char *url) {
+    if (!url || strncmp(url, "https://", 8)) return;
+    memmove(url + 4, url + 5, strlen(url) - 4);   // 去掉 "https" 里的 's':"http://..."
+}
+
 // 返回 1=完整下载结束,0=被中止,2=因暂停主动断开,-1=可重试错误,-2=不可重试(4xx 等)。
-static int fetch_once(const char *start_url, uint64_t *offset, uint8_t *buf) {
+static int fetch_once(const char *start_url, uint64_t *offset, uint8_t *buf, bool prefer_http) {
+    // TLS1.3 已在 sdkconfig 关闭(内存考量),CDN 连接改发 ALPN http/1.1 维持浏览器式
+    // 指纹,规避阿里 WAF 对"仅 TLS1.2 + 无 ALPN"连接的风控(bp_ali 同款处理)。
+    static const char *alpn_protos[] = { "http/1.1", NULL };
     char *url = strdup(start_url);
+    if (prefer_http) url_downgrade_http(url);
     int result = -1;
     for (int hop = 0; url && hop < 5 && !s_abort; hop++) {
         fetch_ctx_t ctx = {0};
@@ -176,17 +256,28 @@ static int fetch_once(const char *start_url, uint64_t *offset, uint8_t *buf) {
             .url = url,
             .crt_bundle_attach = esp_crt_bundle_attach,
             .method = HTTP_METHOD_GET,
-            .timeout_ms = 10000,
+            // 明文探测大概率不通(实测 CDN 80 端口直接超时),用短超时把每轮
+            // 开机的浪费控制在 4 秒内;https 正式下载维持 10 秒。
+            .timeout_ms = prefer_http ? 4000 : 10000,
             .disable_auto_redirect = true,
             .event_handler = fetch_event,
             .user_data = &ctx,
-            .buffer_size = 2048,
-            .buffer_size_tx = 2048,   // dlink 带签名参数,请求行较长
+            // rx 缓冲 4KB:配合 FETCH_CHUNK=4096,每次 read 返回一整块数据,
+            // 减少 TLS 记录分片读取的次数(2KB 时读满 16KB 记录要 8 次)。
+            .buffer_size = 4096,
+            // dlink 带签名参数,请求行较长:实测阿里云盘 CDN 签名 URL 普遍 >2.5KB,
+            // 2048 时 esp_http_client 组请求行报 "Out of buffer",下载必失败。
+            .buffer_size_tx = 4096,
+            .alpn_protos = alpn_protos,
             .keep_alive_enable = true,
         };
         esp_http_client_handle_t c = esp_http_client_init(&cfg);
         if (!c) break;
-        esp_http_client_set_header(c, "User-Agent", "pan.baidu.com");
+        // 阿里云盘下载直链要求 Referer 头;用浏览器 UA 避免被风控识别为非浏览器客户端重置。
+        esp_http_client_set_header(c, "Referer", "https://www.aliyundrive.com/");
+        esp_http_client_set_header(c, "Origin", "https://www.aliyundrive.com");
+        esp_http_client_set_header(c, "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
         char range[40];
         if (*offset) {
             snprintf(range, sizeof(range), "bytes=%" PRIu64 "-", *offset);
@@ -253,11 +344,20 @@ static void fetch_task(void *arg) {
     int failures = 0, rc = -1;
     while (buf && !s_abort) {
         uint64_t before = offset;
-        rc = fetch_once(t->url, &offset, buf);
+        rc = fetch_once(t->url, &offset, buf, s_prefer_http);
+        if (rc != 2 && rc != 0 && s_prefer_http) {
+            // 明文探测失败:换回 https(签名直链对 http 也可能被 403/重定向)。
+            s_prefer_http = false;
+            ESP_LOGW(TAG, "plain http download failed, falling back to https");
+            continue;   // 立即用 https 重试,不计入 failures
+        }
         if (rc == 2) {
             ESP_LOGI(TAG, "paused: download connection released at %" PRIu64, offset);
             s_fetch_parked = true;
             log_heap("parked");
+            // 暂停/挂起期间不恢复 arena:18KB 预留块保持释放,浏览网盘/切页的列表
+            // 请求才有足够连续内存(历史:挂起时 malloc 回 18KB 会把最大连续块切到
+            // 9~17KB,列表请求 TLS 需 ≥20KB,导致"播放中内存不足" rc=-5)。
             while (s_paused && !s_abort) vTaskDelay(pdMS_TO_TICKS(100));
             s_fetch_parked = false;
             continue;   // 继续播放:按 Range 从断点重连
@@ -323,8 +423,10 @@ static size_t refill(inbuf_t *b) {
         b->received += got;
         if (got) continue;
         if (stream_done() || b->len >= IN_BUF_SIZE / 2) break;
-        // 欠载:重新缓冲 25% 再继续,避免断断续续。
-        if (!wait_buffered(25)) break;
+        // 欠载:重新缓冲 60% 再继续(原 25% 只够 0.09s,恢复后很快再次欠载,
+        // 导致"缓冲中"频繁闪现)。60% ≈ 8.4KB@14KB = 0.21s@320kbps,恢复后
+        // 缓冲更足,下一次欠载明显推迟,播放更连续。
+        if (!wait_buffered(60)) break;
     }
     return added;
 }
@@ -386,7 +488,8 @@ static void publish_progress(uint64_t frames, uint32_t rate, uint32_t total_ms) 
 }
 
 static const char *play_mp3(inbuf_t *b, uint64_t file_size, size_t id3) {
-    HMP3Decoder dec = MP3InitDecoder();
+    mp3_ensure();   // 已初始化则复用;异常时序(竞技场未释放)下兜底再试一次
+    HMP3Decoder dec = s_mp3_dec;
     log_heap("decoder-ready");
     int16_t *pcm = s_pcm_storage;
     const char *error = NULL;
@@ -486,8 +589,7 @@ static const char *play_mp3(inbuf_t *b, uint64_t file_size, size_t id3) {
     }
     if (!error && !s_abort && frames_out == 0) error = "不是有效的 MP3";
 out:
-    if (dec) MP3FreeDecoder(dec);
-    return error;
+    return error;   // 解码器跨曲目持久化,不释放
 }
 
 // known 非空表示续播:流从 start(已按采样帧对齐)开始,没有文件头。
@@ -768,7 +870,9 @@ static void decode_task(void *arg) {
         error = "内存不足";
         goto done;
     }
-    if (!wait_buffered(50)) goto done;
+    // 初始缓冲 75%(≈10.5KB=0.26s@320kbps)再开播:比原 50% 多等 0.13s,
+    // 但开播后缓冲水位更高,前几秒更不容易再次进入"缓冲中"。
+    if (!wait_buffered(75)) goto done;
     refill(&b);
     if (b.len < 4) {
         error = s_fetch_failed ? "网络错误" : "文件为空";
@@ -813,6 +917,9 @@ done:
     s_abort = true;   // 通知 fetch 退出(若尚在运行)
     while (s_fetch_running) vTaskDelay(pdMS_TO_TICKS(20));
     log_heap("pipeline-end");
+    // 流水线拆除(曲目结束/挂起/停止)时不恢复 arena:保持释放让列表请求可用。
+    // 播放器真正进入 idle(列表播完/停止)时由 finish_idle 里的 restore("idle") 预留。
+    // 连续切歌时下一首 start_track 的 release() 会走 probe 快速重拿(通常立即成功)。
     // 记录挂起点:下一个未解码字节 = 起始偏移 + 已读入 - 输入缓冲中未消费的部分。
     portENTER_CRITICAL(&s_mux);
     s_resume.offset = t->start + b.received - (b.len - b.pos);
@@ -850,8 +957,9 @@ static void stop_pipeline(void) {
 typedef struct {
     uint8_t source;        // bp_source_t
     int32_t page;
-    uint32_t start;        // 该页在网盘接口里的起始偏移
-    uint64_t fs_id;        // 当前曲目
+    char marker[BP_MARKER_MAX];   // 该页在网盘接口里的游标
+    char file_id[BP_FILE_ID_MAX]; // 当前曲目
+    char parent_file_id[BP_FILE_ID_MAX]; // 该页所在目录的 file_id
     char dir[BP_PATH_MAX];
 } last_play_t;
 
@@ -862,8 +970,9 @@ static void remember_last(const bp_file_t *f) {
     memset(&lp, 0, sizeof(lp));   // 含填充字节,便于 memcmp
     lp.source = (uint8_t)s_pl_req.source;
     lp.page = s_pl_req.page;
-    lp.start = s_pl_req.start;
-    lp.fs_id = f->fs_id;
+    strlcpy(lp.marker, s_pl_req.marker, sizeof(lp.marker));
+    strlcpy(lp.file_id, f->file_id, sizeof(lp.file_id));
+    strlcpy(lp.parent_file_id, s_pl_req.parent_file_id, sizeof(lp.parent_file_id));
     strlcpy(lp.dir, s_pl_req.dir, sizeof(lp.dir));
     if (memcmp(&lp, &s_last_saved, sizeof(lp)) == 0) return;   // 未变化不重复写 flash
     nvs_handle_t h;
@@ -920,8 +1029,10 @@ static void start_track_at(int index, bool resume) {
     s_paused = false;
 
     char *url = NULL;
+    heap_arena_release("play");   // 播放全程(含 dlink)把预留块让给 TLS 大记录分配
+    mp3_ensure();                 // 堆最平整、无 TLS 会话的窗口:初始化持久化解码器
     log_heap("before-dlink");
-    if (bp_baidu_dlink(f->fs_id, &url) != 0) {
+    if (bp_aliyun_dlink(f->file_id, &url) != 0) {
         set_state(BP_PLAY_ERROR, g_bp.wifi_up ? "获取下载地址失败" : "无网络");
         post(CMD_TRACK_FAIL, gen, NULL);   // 让 ctrl 统一处理跳过逻辑
         return;
@@ -967,17 +1078,17 @@ static bool continue_next_page(void) {
     if (!page) return false;
     bp_list_req_t req = s_pl_req;
     req.page++;
-    req.start = s_pl_next_start;
+    strlcpy(req.marker, s_pl_next_marker, sizeof(req.marker));
     bool started = false;
     set_state(BP_PLAY_RESOLVING, NULL);
-    if (bp_baidu_list_fetch(&req, page) == 0) {
+    if (bp_aliyun_list_fetch(&req, page) == 0) {
         int n = 0;
         for (int i = 0; i < page->count; i++)
             if (!page->files[i].is_dir && page->files[i].format != BP_FMT_UNKNOWN)
                 s_playlist[n++] = page->files[i];
         s_pl_req = req;
         s_pl_has_more = page->has_more;
-        s_pl_next_start = page->next_start;
+        strlcpy(s_pl_next_marker, page->next_marker, sizeof(s_pl_next_marker));
         if (n) {
             s_pl_count = n;
             start_track(0);
@@ -1009,22 +1120,24 @@ static int play_last(void) {
     s_last_saved = lp;
     bp_list_t *page = malloc(sizeof(bp_list_t));
     if (!page) return -1;
-    bp_list_req_t req = {.source = (bp_source_t)lp.source, .page = lp.page, .start = lp.start};
+    bp_list_req_t req = {.source = (bp_source_t)lp.source, .page = lp.page};
+    strlcpy(req.marker, lp.marker, sizeof(req.marker));
+    strlcpy(req.parent_file_id, lp.parent_file_id, sizeof(req.parent_file_id));
     strlcpy(req.dir, lp.dir, sizeof(req.dir));
     bool started = false;
-    if (bp_baidu_list_fetch(&req, page) == 0) {
+    if (bp_aliyun_list_fetch(&req, page) == 0) {
         int n = 0, index = 0;
         for (int i = 0; i < page->count; i++) {
             const bp_file_t *f = &page->files[i];
             if (f->is_dir || f->format == BP_FMT_UNKNOWN) continue;
-            if (f->fs_id == lp.fs_id) index = n;
+            if (strcmp(f->file_id, lp.file_id) == 0) index = n;
             s_playlist[n++] = *f;
         }
         if (n) {
             s_pl_count = n;
             s_pl_req = req;
             s_pl_has_more = page->has_more;
-            s_pl_next_start = page->next_start;
+            strlcpy(s_pl_next_marker, page->next_marker, sizeof(s_pl_next_marker));
             start_track(index);
             started = true;
         }
@@ -1036,6 +1149,7 @@ static int play_last(void) {
 
 static void finish_idle(void) {
     esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    heap_arena_restore("idle");   // dlink 失败等不走流水线收尾的路径也要归还预留块
     portENTER_CRITICAL(&s_mux);
     s_info.pos_ms = 0;   // 停止后进度归零;曲名保留,单击 OK 可重播
     s_info.buffer_pct = 0;
@@ -1056,7 +1170,7 @@ static void ctrl_task(void *arg) {
                 s_pl_count = s_pending_count;
                 s_pl_req = s_pending_req;
                 s_pl_has_more = s_pending_has_more;
-                s_pl_next_start = s_pending_next_start;
+                strlcpy(s_pl_next_marker, s_pending_next_marker, sizeof(s_pl_next_marker));
                 int index = s_pending_index;
                 portEXIT_CRITICAL(&s_mux);
                 consecutive_failures = 0;
@@ -1152,7 +1266,7 @@ int bp_player_play_list(const bp_list_t *list, int index) {
     s_pending_index = start;
     s_pending_req = list->req;
     s_pending_has_more = list->has_more;
-    s_pending_next_start = list->next_start;
+    strlcpy(s_pending_next_marker, list->next_marker, sizeof(s_pending_next_marker));
     portEXIT_CRITICAL(&s_mux);
     if (start < 0) return -2;
     post(CMD_PLAY, 0, NULL);
@@ -1229,4 +1343,6 @@ void bp_player_init(void) {
     s_cmd = xQueueCreate(6, sizeof(cmd_t));
     if (!s_cmd || xTaskCreate(ctrl_task, "bp_ctrl", CTRL_STACK, NULL, 5, NULL) != pdPASS)
         ESP_LOGE(TAG, "player task create failed");
+    // 竞技场改为惰性预留:开机就占用会挤死启动期首次 TLS 验签(实测 min=196)。
+    // 第一次播放收尾/暂停/停止时由 heap_arena_restore 建立。
 }

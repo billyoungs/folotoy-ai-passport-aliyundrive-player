@@ -1,7 +1,7 @@
 [English](/docs/README.md) · **简体中文**
 
-> **百度网盘随身听**：本仓库是基于 AI Passport 的应用，可流式播放百度网盘里的 MP3、M4A、AAC 和 WAV，支持网页配网和扫码绑定。
-> 凭据配置、按键与限制见 [baidupan-pocket-player.zh_CN.md](baidupan-pocket-player.zh_CN.md)。以下模板文档保留自上游
+> **阿里云盘随身听**：本仓库是基于 AI Passport 的应用，可流式播放阿里云盘里的 MP3、M4A、AAC 和 WAV，支持网页配网和扫码绑定。
+> 按键与限制见 [aliyundrive-pocket-player.zh_CN.md](aliyundrive-pocket-player.zh_CN.md)。以下模板文档保留自上游
 > [FoloToy AI Passport](https://github.com/FoloToy/ai-passport)。
 
 <h1 align="center">FoloToy AI PASSPORT</h1>

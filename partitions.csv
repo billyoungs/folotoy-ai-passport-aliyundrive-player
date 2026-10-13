@@ -1,5 +1,5 @@
 # Name,   Type, SubType, Offset,   Size,     Flags
-# 百度网盘随身听为纯流式播放,不需要本地存储分区;应用占用 NVS/PHY 之后的全部 Flash
+# 阿里云盘随身听为纯流式播放,不需要本地存储分区;应用占用 NVS/PHY 之后的全部 Flash
 # (中文全字库约 1 MiB)。
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,

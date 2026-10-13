@@ -1,4 +1,4 @@
-// main/bp_ui.c —— 百度网盘随身听界面(240x320 竖屏,圆角屏)。
+// main/bp_ui.c —— 阿里云盘随身听界面(240x320 竖屏,圆角屏)。
 //
 // 常用页面(播放、列表、设置)在 bp_ui_init 建好,切页只切换 HIDDEN;不常用的页面
 // (绑定、配网、无线网络、账号、亮度、关于、播放界面选择)进入时创建、离开时删除,
@@ -28,9 +28,9 @@ LV_FONT_DECLARE(bp_font_24);
 #define COL_BG       0x0B1220
 #define COL_SURFACE  0x16213A
 #define COL_SURFACE2 0x22314F
-// 强调色取自 ai-passport.folotoy.cn:--passport-green 与其上的文字色 --passport-on-green。
-#define COL_ACCENT   0x20E47C
-#define COL_ON_ACC   0x092113
+// 主题色:紫色(原绿色 0x20E47C,按用户要求改为紫色)。
+#define COL_ACCENT   0x9C27B0
+#define COL_ON_ACC   0x2A0A33
 #define COL_TEXT     0xEEF2F8
 #define COL_MUTED    0x8A97B0
 #define COL_DANGER   0xFF6B6B
@@ -66,6 +66,8 @@ const char *const BP_SKIN_NAMES[BP_SKIN_COUNT] = {"经典", "磁带", "布鲁伊
 extern const lv_image_dsc_t bp_disc_bluey_thumb, bp_disc_bingo_thumb, bp_disc_peppa_thumb;
 static lv_obj_t *s_pl_classic, *s_pl_reel;
 static int64_t s_anim_last;
+// 最近一次完整跑完 200ms UI 刷新的时间(esp_timer 微秒)。0=尚未完成过一次。
+static int64_t s_last_refresh_us;
 static int s_built_skin = -1;
 static bool s_hint_on;                       // 开机续播提示
 static char s_hint_line[48], s_hint_folder[BP_FOLDER_MAX];
@@ -260,14 +262,16 @@ static void build_player(void) {
 
 static void build_auth(void) {
     lv_obj_t *p = s_pages[BP_PAGE_AUTH] = page();
-    s_auth_title = page_title(p, s_onboarding ? "第2步 绑定网盘" : "连接百度网盘");
+    s_auth_title = page_title(p, s_onboarding ? "第2步 绑定网盘" : "绑定阿里云盘");
     s_auth_qr_box = box(p, 44, 72, 152, 152, 0xFFFFFF, 12);
     s_auth_qr = lv_qrcode_create(s_auth_qr_box);
-    lv_qrcode_set_size(s_auth_qr, 136);
+    // 120px 二维码位图约 28.8KB(136px 要 36KB):授权页无播放、堆较紧张,减小位图
+    // 尺寸可避免 LVGL 渲染标题字形时内存不足导致缺字/残影。
+    lv_qrcode_set_size(s_auth_qr, 120);
     lv_qrcode_set_dark_color(s_auth_qr, lv_color_hex(0x000000));
     lv_qrcode_set_light_color(s_auth_qr, lv_color_hex(0xFFFFFF));
     lv_obj_center(s_auth_qr);
-    s_auth_code = label(p, &lv_font_montserrat_20, COL_TEXT, "");
+    s_auth_code = label(p, &bp_font_16, COL_TEXT, "");   // 二维码下方中文提示必须用中文字体
     lv_obj_align(s_auth_code, LV_ALIGN_TOP_MID, 0, 232);
     s_auth_hint = label(p, &bp_font_16, COL_MUTED, "");
     lv_obj_set_width(s_auth_hint, 196);
@@ -309,20 +313,21 @@ static void tape_thumb(lv_obj_t *c, const lv_image_dsc_t *l, const lv_image_dsc_
             lv_obj_set_pos(o, i ? 50 : 6, 6);
             continue;
         }
-        lv_obj_t *reel = box(c, i ? 52 : 8, 8, 32, 32, 0xEFFFF5, LV_RADIUS_CIRCLE);
+        lv_obj_t *reel = box(c, i ? 52 : 8, 8, 32, 32, 0xF3E5F5, LV_RADIUS_CIRCLE);
         lv_obj_set_style_border_width(reel, 1, 0);
-        lv_obj_set_style_border_color(reel, lv_color_hex(0x092113), 0);
-        box(reel, 11, 11, 10, 10, i ? 0x0A8F4D : 0x092113, LV_RADIUS_CIRCLE);
+        lv_obj_set_style_border_color(reel, lv_color_hex(0x2A0A33), 0);
+        box(reel, 11, 11, 10, 10, i ? 0x7B1FA2 : 0x2A0A33, LV_RADIUS_CIRCLE);
     }
-    box(c, 10, 50, 72, 1, 0x092113, 0);
-    box(c, 10, 58, 44, 5, 0x092113, 2);
-    box(c, 10, 67, 30, 4, 0x092113, 2);
+    box(c, 10, 50, 72, 1, 0x2A0A33, 0);
+    box(c, 10, 58, 44, 5, 0x2A0A33, 2);
+    box(c, 10, 67, 30, 4, 0x2A0A33, 2);
 }
 
 static void build_skin(void) {
     lv_obj_t *p = s_pages[BP_PAGE_SKIN] = page();
     page_title(p, "播放界面");
-    static const uint32_t bg[BP_SKIN_COUNT] = {COL_BG, 0x20E47C, 0x5CB8EC, 0xF58FB3};
+    // 磁带皮肤背景由绿色改为紫色(与主题色一致)。
+    static const uint32_t bg[BP_SKIN_COUNT] = {COL_BG, 0x9C27B0, 0x5CB8EC, 0xF58FB3};
     for (int i = 0; i < BP_SKIN_COUNT; i++) {
         int x = i % 2 ? 126 : 22, y = i / 2 ? 166 : 60;
         lv_obj_t *c = s_skin_card[i] = box(p, x, y, 92, 80, bg[i], 14);
@@ -357,7 +362,7 @@ static void build_skin(void) {
             default: tape_thumb(c, &bp_disc_peppa_thumb, &bp_disc_peppa_thumb); break;
         }
         // 使用中:右下角的勾。
-        s_skin_tag[i] = box(c, 68, 56, 18, 18, 0x092113, LV_RADIUS_CIRCLE);
+        s_skin_tag[i] = box(c, 68, 56, 18, 18, 0x2A0A33, LV_RADIUS_CIRCLE);
         lv_obj_t *ok = label(s_skin_tag[i], &lv_font_montserrat_14, 0xFFFFFF, LV_SYMBOL_OK);
         lv_obj_center(ok);
     }
@@ -449,7 +454,7 @@ static void build_about(void) {
     }
     lv_obj_t *formats = label(p, &bp_font_16, COL_MUTED, "支持 MP3 · M4A · AAC · WAV");
     lv_obj_align(formats, LV_ALIGN_TOP_MID, 0, 248);
-    lv_obj_t *ver = label(p, &bp_font_16, COL_MUTED, "百度网盘随身听 v" BP_APP_VERSION);
+    lv_obj_t *ver = label(p, &bp_font_16, COL_MUTED, "阿里云盘随身听 v" BP_APP_VERSION);
     lv_obj_align(ver, LV_ALIGN_TOP_MID, 0, 270);
 }
 
@@ -504,10 +509,10 @@ static void refresh_toast(void) {
 
 static bool list_changed(const bp_list_t *a, const bp_list_t *b) {
     return a->status != b->status || a->count != b->count || a->has_more != b->has_more ||
-           a->req.page != b->req.page || a->req.start != b->req.start ||
+           a->req.page != b->req.page || strcmp(a->req.marker, b->req.marker) != 0 ||
            a->req.source != b->req.source ||
            strcmp(a->req.dir, b->req.dir) ||
-           (a->count && a->files[0].fs_id != b->files[0].fs_id);
+           (a->count && strcmp(a->files[0].file_id, b->files[0].file_id) != 0);
 }
 
 // 虚拟行:[上一页] 文件... [下一页]
@@ -528,7 +533,7 @@ static bp_row_kind_t row_kind(int row, int *file_index) {
 
 static void refresh_list(void) {
     static bp_list_t snap;   // 约 1.7 KiB,不放在 LVGL 任务栈上
-    bp_baidu_list_snapshot(&snap);
+    bp_aliyun_list_snapshot(&snap);
     if (list_changed(&snap, &s_list)) {
         s_list = snap;
         s_list_rows = s_list.count + (s_list.req.page > 0) + (s_list.has_more ? 1 : 0);
@@ -619,24 +624,41 @@ static void refresh_player(const bp_player_info_t *ppi) {
 }
 
 static void refresh_auth(void) {
-    char url[96], code[16], buf[48];
-    bp_baidu_get_auth(url, sizeof(url), code, sizeof(code));
-    bool ready = url[0] && code[0];
-    if (ready && strcmp(url, s_auth_shown)) {
-        lv_qrcode_update(s_auth_qr, url, strlen(url));
-        strlcpy(s_auth_shown, url, sizeof(s_auth_shown));
+    char url[96], code[16];
+    bp_aliyun_get_auth(url, sizeof(url), code, sizeof(code));
+    bp_bd_state_t st = bp_aliyun_state();
+    if (st == BP_BD_WAIT_QR) {
+        // 扫码登录:显示二维码,按登录阶段更新提示。
+        lv_obj_clear_flag(s_auth_qr_box, LV_OBJ_FLAG_HIDDEN);
+        char qr[512];
+        int qst = 0;
+        bp_aliyun_qr_get(qr, sizeof(qr), &qst);
+        static char s_last_qr[512];
+        if (qr[0] && strcmp(qr, s_last_qr) != 0) {
+            lv_qrcode_update(s_auth_qr, qr, (uint32_t)strlen(qr));
+            strlcpy(s_last_qr, qr, sizeof(s_last_qr));
+        }
+        set_text_if(s_auth_code, qr[0] ? "手机阿里云盘 App 扫码" : "");
+        const char *hint;
+        if (!g_bp.wifi_up) hint = "请先连接 Wi-Fi\n设置 → 无线网络";
+        else if (qst == 2) hint = "已扫码，请在手机上确认";
+        else if (qst == 3) hint = "登录已结束，请返回设置重试";
+        else hint = "请用阿里云盘 App 扫描二维码";
+        set_text_if(s_auth_hint, hint);
+        // 注意:s_auth_hint 构建时已定位在 y=262(二维码下方第二行),不要再用
+        // set_y 移动,否则会与 y=232 的 s_auth_code 重叠产生文字残影。
+        return;
     }
-    if (ready) lv_obj_remove_flag(s_auth_qr_box, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(s_auth_qr_box, LV_OBJ_FLAG_HIDDEN);
-    snprintf(buf, sizeof(buf), "%s", ready ? code : "");
-    set_text_if(s_auth_code, buf);
+    // 非扫码模式(串口令牌/已授权):隐藏二维码,维持原提示。
+    lv_obj_add_flag(s_auth_qr_box, LV_OBJ_FLAG_HIDDEN);
+    set_text_if(s_auth_code, "");
     const char *hint;
-    if (bp_baidu_state() == BP_BD_READY) hint = "授权成功";
+    if (st == BP_BD_READY) hint = "授权成功";
     else if (!g_bp.wifi_up) hint = "请先连接 Wi-Fi\n设置 → 无线网络";
-    else if (ready) hint = "用百度网盘 App 扫码\n并确认授权";
-    else hint = "正在获取授权码…";
+    else if (st == BP_BD_WAIT_CODE) hint = "正在校验令牌…";
+    else hint = "按 OK 开始扫码登录";   // 不再提示串口 ALI TOKEN
     set_text_if(s_auth_hint, hint);
-    lv_obj_set_y(s_auth_hint, ready ? 262 : 140);
+    lv_obj_set_y(s_auth_hint, 140);
 }
 
 static void refresh_brightness(void) {
@@ -654,7 +676,7 @@ static void refresh_settings(void) {
     if (g_bp.wifi_up) bp_wifi_get_ssid(ssid, sizeof(ssid));
     const char *vals[BP_MENU_COUNT] = {
         "", "", BP_SKIN_NAMES[g_bp.skin], bri,
-        g_bp.wifi_up ? ssid : "未连接", bp_baidu_state() == BP_BD_READY ? "已绑定" : "未绑定", "", "",
+        g_bp.wifi_up ? ssid : "未连接", bp_aliyun_state() == BP_BD_READY ? "已绑定" : "未绑定", "", "",
     };
     int sel = s_sel[BP_PAGE_SETTINGS];
     int first = sel - MENU_ROWS / 2;
@@ -759,13 +781,13 @@ static void refresh_wifi_ap(void) {
 }
 
 static void refresh_account(void) {
-    bp_bd_state_t st = bp_baidu_state();
+    bp_bd_state_t st = bp_aliyun_state();
     set_text_if(s_acct_state, st == BP_BD_READY ? "状态：已授权\n可以浏览和播放网盘音频" :
-                              "状态：未授权\n需要扫码授权后才能使用");
-    set_text_if(s_acct_action, st == BP_BD_READY ? (s_acct_armed ? "确认退出" : "退出登录") : "扫码授权");
+                              "状态：未授权\n需要绑定阿里云盘");
+    set_text_if(s_acct_action, st == BP_BD_READY ? (s_acct_armed ? "确认退出" : "退出登录") : "绑定账号");
     set_text_if(s_acct_hint, st == BP_BD_READY ?
                 (s_acct_armed ? "再按一次 OK 退出\n网盘文件不受影响" : "退出只清除本机授权") :
-                "按 OK 显示授权二维码");
+                "按 OK 查看绑定说明");
 }
 
 static void ui_timer_cb(lv_timer_t *t) {
@@ -789,6 +811,13 @@ static void ui_timer_cb(lv_timer_t *t) {
         case BP_PAGE_SKIN: refresh_skin(); break;
         default: break;
     }
+    // 整次 UI 刷新完整跑完才打点:心跳据此判断 taskLVGL 是否假死(如堆耗尽触发的
+    // LVGL assert while(1))。卡死时该时间戳停止前进,心跳会强制重启自恢复。
+    s_last_refresh_us = esp_timer_get_time();
+}
+
+int64_t bp_ui_ms_since_refresh(void) {
+    return (esp_timer_get_time() - s_last_refresh_us) / 1000;
 }
 
 // ---- 公共接口 -------------------------------------------------------------------
@@ -914,7 +943,7 @@ void bp_ui_list_reset_sel(void) { s_sel[BP_PAGE_LIST] = 0; }
 void bp_ui_set_onboarding(bool on) {
     s_onboarding = on;
     if (s_pages[BP_PAGE_WIFI_AP]) set_text_if(s_ap_title, on ? "第1步 连接网络" : "网页配网");
-    if (s_pages[BP_PAGE_AUTH]) set_text_if(s_auth_title, on ? "第2步 绑定网盘" : "连接百度网盘");
+    if (s_pages[BP_PAGE_AUTH]) set_text_if(s_auth_title, on ? "第2步 绑定网盘" : "连接阿里云盘");
 }
 
 void bp_ui_account_arm(bool armed) {

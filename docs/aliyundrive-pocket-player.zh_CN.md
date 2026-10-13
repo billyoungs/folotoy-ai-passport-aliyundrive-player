@@ -1,29 +1,22 @@
 <p align="right">
-  <strong>简体中文</strong> · <a href="baidupan-pocket-player.md">English</a>
+  <strong>简体中文</strong> · <a href="aliyundrive-pocket-player.md">English</a>
 </p>
 
-# 百度网盘随身听
+# 阿里云盘随身听
 
-在 FoloToy AI Passport 上流式播放百度网盘里的 MP3 / M4A / AAC / WAV 音频。百度网盘的接入方式
-(设备码扫码授权、令牌刷新、xpan 接口)参考了
-[netdisk-recording-badge](https://github.com/openbrt/netdisk-recording-badge)。
-
-## 准备百度网盘应用凭据
-
-1. 在[百度网盘开放平台](https://pan.baidu.com/union/console)完成开发者认证并创建应用,
-   记下 AppKey 与 SecretKey。
-2. 复制 `main/bp_baidu_keys.example.h` 为 `main/bp_baidu_keys.h`(已被 Git 忽略),填入凭据后重新编译。
-   缺少该文件时固件用占位符编译,设备无法完成授权。
+在 FoloToy AI Passport 上流式播放阿里云盘里的 MP3 / M4A / AAC / WAV 音频。阿里云盘的接入方式
+(设备扫码授权、refresh_token 轮换、盘/文件接口)为本 fork 的原创工作,参考社区公开的阿里云盘
+OAuth 流程实现。
 
 ## 上手
 
-1. 配网(仅 2.4 GHz):首次开机没有已存网络时,设备自动开启热点 `BaiduPlayer-XXXX` 并显示二维码。
+1. 配网(仅 2.4 GHz):首次开机没有已存网络时,设备自动开启热点 `AliyunPlayer-XXXX` 并显示二维码。
    手机扫码连上热点后会弹出配网网页(未弹出就访问 `http://192.168.4.1`),选择网络并输入密码;
    设备试连成功才保存,完成后自动关闭热点并联网。之后可在“设置 → 无线网络”按 OK 再次开启热点。
    可保存多个网络,开机自动连接已存网络。也可用 USB 串口输入 `WIFI SET 网络名称|密码`。
-2. 绑定网盘:联网后自动进入绑定页,用百度网盘 App 扫屏幕二维码并确认授权,完成后自动打开“全部音频”。
+2. 绑定网盘:联网后自动进入绑定页,用阿里云盘 App 扫屏幕二维码并确认授权,完成后自动打开“全部音频”。
    在绑定页长按 OK 可先跳过,之后从“设置 → 网盘账号”绑定。
-   授权保存在本机,只需一次;“设置 → 网盘账号”可退出。
+   refresh_token 保存在本机并自动轮换;“设置 → 网盘账号”可退出。
 3. 播放:“全部音频”按名称顺序列出网盘内所有 MP3/M4A/AAC/WAV;“浏览网盘”按文件夹浏览,同样按名称排序。
    浏览网盘(读取新列表)时如果正在播放,会自动暂停并释放下载连接,回到播放页按 OK 继续。
    选中歌曲按 OK 播放,播完自动播放下一首,当前页播完会自动加载下一页。
@@ -61,18 +54,17 @@
 - 暂不支持 FLAC、OGG 等;浏览网盘时只显示文件夹和可播放的文件,其余文件不显示。
 - 暂不支持拖动进度。VBR MP3 的总时长按平均码率估算。
 - 网络中断时按 HTTP Range 从断点续传;长时间暂停后服务器断开也会自动续上。
-- 百度对非会员账号的下载限速可能影响高码率 WAV,MP3 通常不受影响。
 
 ## 实现概览
 
 | 模块 | 职责 |
 | --- | --- |
-| `main/bp_baidu.c` | 设备码授权、令牌刷新(加锁,refresh_token 只能用一次)、目录与音频列表、下载直链 |
-| `main/bp_player.c` | 控制任务 → 下载任务(跟随 302、Range 续传)→ 20 KiB 静态环形缓冲→ 解码任务(Helix MP3 / AAC / WAV)→ I2S |
+| `main/bp_aliyun.c` | 设备扫码授权、refresh_token 轮换、目录与音频列表、下载直链 |
+| `main/bp_player.c` | 控制任务 → 下载任务(跟随 302、Range 续传)→ 14 KiB 静态环形缓冲→ 解码任务(Helix MP3 / AAC / WAV)→ I2S |
 | `main/bp_ui.c` | 播放、列表、设置页常驻;其他页面进入时创建、离开时释放;只保留当前皮肤 |
 | `main/bp_ui_reel.c` | 磁带界面:24 帧转轮与鱼头/鱼尾各 9 帧摆动、人物盘面各 36 帧,均预渲染在 Flash(无运行时旋转),声波跟随实时音量 |
 | `main/bp_media.c` | 纯逻辑:格式与内容识别、MP3 帧头校验、ID3v2 跳过、WAV 解析、时长、路径(主机测试 `tests/test_bp_media.c`) |
 | `main/bp_mp4.c` | 流式 M4A 头部解析,mdat 按连续裸 AAC 块解码(主机测试 `tests/test_bp_mp4.c`) |
-| `main/bp_console.c` | 串口命令:`WIFI SET/LIST/DEL/AP`、`BAIDU AUTH/STATUS/LOGOUT`、`STATE`、`LIST`、`HEAP`、`STOP`、`KEY`、`UI` |
+| `main/bp_console.c` | 串口命令:`WIFI SET/LIST/DEL/AP`、`ALI TOKEN/LOGOUT/DRIVE/QR/SHOW/SCAN`、`STATE`、`LIST`、`HEAP`、`STOP`、`KEY`、`UI` |
 
 中文字体 `bp_font_16` 收录 GB2312 全部字符以显示任意文件名,由 `tools/generate_bp_fonts.py` 生成。

@@ -5,13 +5,14 @@ bp_font_16: ASCII + every GB2312 character, so arbitrary Netdisk file names rend
 bp_font_24: ASCII + the CJK characters used by fixed UI strings (page titles).
 """
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "assets/fonts"
 FONT = ASSETS / "SourceHanSansSC-Regular.otf"
-SOURCES = ("bp_ui.c", "bp_ui_reel.c", "main.c", "bp_baidu.c", "bp_player.c")
+SOURCES = ("bp_ui.c", "bp_ui_reel.c", "main.c", "bp_aliyun.c", "bp_player.c", "bp_console.c")
 NON_ASCII = re.compile(r"[^\x00-\x7f]")
 
 
@@ -38,8 +39,10 @@ def gb2312() -> set[int]:
 def convert(name: str, size: int, symbols: set[int]) -> None:
     target = ASSETS / f"{name}.c"
     ranges = ",".join(hex(c) for c in sorted(symbols))
+    # Windows 上 npx 是 npx.cmd,subprocess 直接调用会找不到,用 shutil.which 定位。
+    npx = shutil.which("npx") or "npx"
     subprocess.run(
-        ["npx", "--yes", "lv_font_conv@1.5.3", "--font", str(FONT),
+        [npx, "--yes", "lv_font_conv@1.5.3", "--font", str(FONT),
          "--range", "0x20-0x7e", "--range", ranges, "--size", str(size), "--bpp", "4",
          "--format", "lvgl", "--no-compress", "--lv-include", "lvgl.h",
          "--lv-font-name", name, "--output", str(target)],
@@ -55,5 +58,7 @@ def convert(name: str, size: int, symbols: set[int]) -> None:
 
 if __name__ == "__main__":
     ui = ui_symbols()
-    convert("bp_font_16", 16, gb2312() | ui)
+    # 16px 字体已包含全部 GB2312 字符,且 Windows 命令行长度限制(约 32KB)放不下
+    # 逐字符的 --range 列表,故这里只重新生成 24px 标题字体。
+    # convert("bp_font_16", 16, gb2312() | ui)
     convert("bp_font_24", 24, ui)
